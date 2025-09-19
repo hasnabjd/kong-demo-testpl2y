@@ -1,0 +1,165 @@
+name: Build kong-demo-testpl2y API - Generate Kong Configs
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/*
+      - main
+    paths:
+      - '**/openapi.yaml'
+      - '**/kong/**'
+      - 'kong/plugins/**'
+      - 'kong/consumers/**'
+      - '.github/workflows/build.yaml'
+
+jobs:
+  generate-service-configs:
+    name: Generate Kong config for each service
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: ["booking-service", "flight-service"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup deck
+        uses: kong/setup-deck@v1
+        with:
+          wrapper: false
+
+      - name: Generate Kong Declarative Configs from OpenAPI
+        run: |
+          deck file openapi2kong \
+            --spec ${{ matrix.service }}/openapi.yaml \
+            --output-file ${{ matrix.service }}/kong/.generated/kong.yaml
+
+      - name: Merge all plugins in the service
+        run: |
+          if [ -d "${{ matrix.service }}/kong/plugins" ]; then
+            files=$(find ${{ matrix.service }}/kong/plugins -name "*.yaml" -type f) \
+            && deck file merge $files ${{ matrix.service }}/kong/.generated/kong.yaml --output-file ${{ matrix.service }}/kong/.generated/kong.yaml
+          else
+            echo "No plugins directory found, skipping plugins merge"
+          fi
+
+      - name: Merge consumers in the service
+        run: |
+          if [ -d "${{ matrix.service }}/kong/consumers" ]; then
+            files=$(find ${{ matrix.service }}/kong/consumers -name "*.yaml" -type f) \
+            && deck file merge $files ${{ matrix.service }}/kong/.generated/kong.yaml --output-file ${{ matrix.service }}/kong/.generated/kong.yaml
+          else
+            echo "No consumers directory found, skipping consumers merge"
+          fi
+
+      - name: Add tags
+        run: |
+          cat ${{ matrix.service }}/kong/.generated/kong.yaml | \
+          deck file add-tags ${{ matrix.service }} \
+          --selector "$.services[*]" \
+          --selector "$.services[*].routes[*]"  \
+          --selector "$.plugins[*]" \
+          --selector "$.consumers[*]" \
+          --output-file ${{ matrix.service }}/kong/.generated/kong.yaml
+
+      - name: Apply optional patches
+        run: |
+          if [ -f "${{ matrix.service }}/kong/patches.yaml" ]; then
+            cat ${{ matrix.service }}/kong/.generated/kong.yaml | \
+            deck file patch ${{ matrix.service }}/kong/patches.yaml \
+            --output-file ${{ matrix.service }}/kong/.generated/kong.yaml
+          else
+            echo "No patches.yaml found, skipping patch step"
+          fi
+
+      - name: Upload service config artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-configs-${{ matrix.service }}
+          path: ${{ matrix.service }}/kong/.generated/kong.yaml
+
+  merge-validate-deploy:
+    name: Merge configs, validate and deploy
+    runs-on: ubuntu-latest
+    needs: generate-service-configs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup deck
+        uses: kong/setup-deck@v1
+        with:
+          wrapper: false
+
+      - name: Download service config artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: service-configs-*
+          path: ./service-configs/
+
+      - name: Merge all service Kong configurations
+        run: |
+          mkdir -p .github/artifacts/
+          files=$(find ./service-configs/* -name "kong.yaml" -type f)
+          if [ -n "$files" ]; then
+            deck file merge $files --output-file .github/artifacts/final-kong-config.yaml
+            echo "All service configurations merged successfully"
+          else
+            echo "No Kong configuration files found to merge"
+          fi
+
+      - name: Merge global plugins
+        run: |
+          if [ -d "kong/plugins" ]; then
+            files=$(find kong/plugins -name "*.yaml" -type f)
+            if [ -n "$files" ]; then
+              deck file merge $files .github/artifacts/final-kong-config.yaml --output-file .github/artifacts/final-kong-config.yaml
+              echo "Global plugins merged successfully"
+            else
+              echo "No global plugins found, skipping global plugins merge"
+            fi
+          else
+            echo "No global plugins directory found, skipping global plugins merge"
+          fi
+
+      - name: Merge global consumers
+        run: |
+          if [ -d "kong/consumers" ]; then
+            files=$(find kong/consumers -name "*.yaml" -type f)
+            if [ -n "$files" ]; then
+              deck file merge $files .github/artifacts/final-kong-config.yaml --output-file .github/artifacts/final-kong-config.yaml
+              echo "Global consumers merged successfully"
+            else
+              echo "No global consumers found, skipping global consumers merge"
+            fi
+          else
+            echo "No global consumers directory found, skipping global consumers merge"
+          fi
+
+      - name: Validate merged Kong config
+        run: |
+          deck file validate .github/artifacts/final-kong-config.yaml
+          echo "Merged configuration validation passed"
+
+      - name: Deck diff for Konnect
+        id: deck-diff
+        run: |
+          deck gateway diff \
+            --konnect-control-plane-name ${{vars.KONNECT_INTERNAL_CP}} \
+            --konnect-token ${{ secrets.KONNECT_PAT }} \
+            --konnect-addr ${{vars.KONNECT_ADDR}} \
+            .github/artifacts/final-kong-config.yaml || true
+          echo "Deck diff generated"
+
+      #an artifact file will be committed only if it the Kong config differs from the previous one.
+      - name: Check status of any files to be committed
+        run: git status
+
+      - name: Create PR to stage changes for the Kong Gateway in production
+        uses: peter-evans/create-pull-request@v5
+        with:
+          title: "❗PRD❗: Staged changes for Kong Gateway PRD deployment - demo_testpl2y"
+          labels: "PRD,kong-config"
+          body: "Staged changes for deploying demo_testpl2y to PRD with merged configurations from all services. Review the deck diff in the workflow logs."
+          add-paths: .github/artifacts/final-kong-config.yaml
