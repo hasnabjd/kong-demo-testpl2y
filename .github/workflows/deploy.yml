@@ -1,0 +1,108 @@
+name: Deploy demo_testpl2y API to Kong
+
+on:
+  push:
+    branches:
+      - main
+      - feat/*
+    paths:
+      - '.github/artifacts/final-kong-config.yaml'
+      - '.github/workflows/deploy.yaml'
+
+  workflow_dispatch:
+
+jobs:
+  deploy-api-to-kong:
+    name: Deploy demo_testpl2y config to Kong
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Check if final Kong config exists
+        id: check_file
+        run: |
+          if [ ! -f ".github/artifacts/final-kong-config.yaml" ]; then
+            echo "Complete Kong configuration file not found at .github/artifacts/final-kong-config.yaml. Stopping workflow. Run the build workflow before deploy."
+            exit 1
+          fi
+
+          echo "Complete Kong configuration file exists!"
+
+      - name: Setup deck
+        uses: kong/setup-deck@v1
+        with:
+          wrapper: false
+
+      - name: Validate connectivity to Konnect
+        run: |
+          deck gateway ping \
+          --konnect-control-plane-name ${{vars.KONNECT_INTERNAL_CP}} \
+          --konnect-token ${{ secrets.KONNECT_PAT }} \
+          --konnect-addr ${{vars.KONNECT_ADDR}}
+
+      - name: Apply Complete Configuration to Kong
+        run: |
+          deck gateway sync \
+           .github/artifacts/final-kong-config.yaml \
+            --konnect-control-plane-name ${{vars.KONNECT_INTERNAL_CP}} \
+            --konnect-token ${{ secrets.KONNECT_PAT }} \
+            --konnect-addr ${{vars.KONNECT_ADDR}}
+
+      - name: Sleep for a couple of seconds
+        run: sleep 10
+
+      - name: Run Integration Tests
+        run: |
+          # Run tests from all service directories
+          
+          if [ -d "booking-service/tests" ]; then
+            echo "Running tests for service: booking-service"
+            for test_script in booking-service/tests/*.sh; do
+              if [ -f "$test_script" ]; then
+                echo "Running $test_script"
+                bash "$test_script"
+                if [ $? -ne 0 ]; then
+                  echo "Test $test_script failed"
+                  exit 1
+                fi
+              fi
+            done
+          else
+            echo "No tests directory found for service booking-service, skipping"
+          fi
+          
+          if [ -d "flight-service/tests" ]; then
+            echo "Running tests for service: flight-service"
+            for test_script in flight-service/tests/*.sh; do
+              if [ -f "$test_script" ]; then
+                echo "Running $test_script"
+                bash "$test_script"
+                if [ $? -ne 0 ]; then
+                  echo "Test $test_script failed"
+                  exit 1
+                fi
+              fi
+            done
+          else
+            echo "No tests directory found for service flight-service, skipping"
+          fi
+          
+
+          # Run global tests if they exist
+          if [ -d "tests" ]; then
+            echo "Running global tests"
+            for test_script in tests/*.sh; do
+              if [ -f "$test_script" ]; then
+                echo "Running $test_script"
+                bash "$test_script"
+                if [ $? -ne 0 ]; then
+                  echo "Test $test_script failed"
+                  exit 1
+                fi
+              fi
+            done
+          else
+            echo "No global tests directory found, skipping"
+          fi
