@@ -1,0 +1,60 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Flight Service",
+    "version": "1.0.0",
+    "description": "Manage KongAir flight schedules"
+  },
+  "servers": [
+    {
+      "url": "https://api.kong-air.com"
+    }
+  ],
+  "paths": {
+    "/flights": {
+      "get": {
+        "summary": "Get all flights",
+        "operationId": "get-flights",
+        "responses": {
+          "200": {
+            "description": "List of flights",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-kong-name": "get-all-flights"
+      }
+    },
+    "/flights/{flight_id}": {
+      "get": {
+        "summary": "Get flight details",
+        "operationId": "get-flight",
+        "parameters": [
+          {
+            "name": "flight_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Flight detail"
+          }
+        },
+        "x-kong-name": "get-flight-details"
+      }
+    }
+  },
+  "x-kong-name": "flight-service"
+}
